@@ -1,5 +1,6 @@
 import cookieParser from "cookie-parser";
 import cors from "cors";
+import crypto from "crypto";
 import express, {
   NextFunction,
   type Application,
@@ -31,32 +32,61 @@ app.use(cookieParser());
 
 app.use("/api/v1/auth", AuthRoutes);
 
-app.post("/zod", async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const UserZodSchema = z.object({
-      name: z.string(),
-	  email:z.email(),
-      age: z.number().optional(),
-      isVerified: z.boolean(),
-      books: z.array(z.string()),
-    });
+// app.post("/zod", async (req: Request, res: Response, next: NextFunction) => {
+//   try {
+//     const UserZodSchema = z.object({
+//       name: z.string(),
+// 	  email:z.email(),
+//       age: z.number().optional(),
+//       isVerified: z.boolean(),
+//       books: z.array(z.string()),
+//     });
 
-    const payload = req.body;
+//     const payload = req.body;
 
-    const result = UserZodSchema.parse(payload);
-	console.log(result)
-    res.status(httpStatus.OK).json({
-      success: true,
-      message: "Welcome to PH Healthcare System Backend",
-	  data:result
-    });
-  } catch (error) {
-	console.log(error)
-    next(error);
-  }
-});
+//     const result = UserZodSchema.parse(payload);
+// 	console.log(result)
+//     res.status(httpStatus.OK).json({
+//       success: true,
+//       message: "Welcome to PH Healthcare System Backend",
+// 	  data:result
+//     });
+//   } catch (error) {
+// 	console.log(error)
+//     next(error);
+//   }
+// });
 
 // Basic route/Home route
+
+app.get("/test", async (req: Request, res: Response, next : NextFunction) => {
+
+	try {
+
+		// 100000 > 999999 > 1000000
+			const otp = crypto.randomInt(100000, 1000000) // 1, 2, 3, 4, 5, 6,7,8 ,9, 10 => X-11
+		
+			// await redisClient.set("forgot-password-otp:patient1@gmail.com", "123456", {
+			// 	expiration : {
+			// 		type : "EX",
+			// 		value : 60
+			// 	}
+			// })
+
+		
+
+
+		res.status(httpStatus.OK).json({
+			success: true,
+			message: "Welcome to PH Healthcare System Backend",
+			data : otp
+		});
+	} catch (error) {
+		console.log(error);
+		next(error)
+	}
+})
+
 app.get("/", async (req: Request, res: Response) => {
   res.status(httpStatus.OK).json({
     success: true,

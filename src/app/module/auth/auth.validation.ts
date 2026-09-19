@@ -51,7 +51,35 @@ const loginZodSchema = z.object({
     }),
 });
 
+const ForgotPasswordZodSchema = z.object({
+  email: z.email(),
+});
+
+const ResetPasswordZodSchema = z.object({
+  email: z.email(),
+  newPassword: z
+    .string()
+    .min(8, { message: "Password must be at least 8 characters long" })
+    .max(20, { message: "Password cannot exceed 20 characters" })
+    .refine((val) => /[A-Z]/.test(val), {
+      message: "Password must contain at least one uppercase letter",
+    })
+    .refine((val) => /[a-z]/.test(val), {
+      message: "Password must contain at least one lowercase letter",
+    })
+    .refine((val) => /[0-9]/.test(val), {
+      message: "Password must contain at least one number",
+    })
+    .refine((val) => /[!@#$%^&*]/.test(val), {
+      message:
+        "Password must contain at least one special character (!@#$%^&*)",
+    }),
+  otp: z.string().length(6),
+});
+
 export const UserValidation = {
   PatientRegistrationZodSchema,
-  loginZodSchema
+  loginZodSchema,
+  ForgotPasswordZodSchema,
+  ResetPasswordZodSchema
 };

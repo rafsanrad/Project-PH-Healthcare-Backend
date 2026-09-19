@@ -46,7 +46,6 @@ export const seedSuperAdmin = async () => {
 };
 
 //create tester admin 
-
 export const seedTesterAdmin = async () => {
     try {
         const isTesterAdminExist = await prisma.user.findUnique({
