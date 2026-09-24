@@ -17,6 +17,12 @@ router.post(
   AppointmentController.payAppointment,
 );
 
+router.post(
+  "/cancel-appointment",
+  auth(Role.PATIENT,Role.ADMIN,Role.SUPER_ADMIN),
+  AppointmentController.cancelAppointment,
+);
+
 //book appointment callback url
 router.get(
   "/book-appointment/payment/callback",
