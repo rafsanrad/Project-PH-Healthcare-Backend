@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { AppError } from "../../utils/AppError";
 import { catchAsync } from "../../utils/catchAsync";
 import { DoctorServices } from "./doctor.service";
 import { sendResponse } from "../../utils/sendResponse";
@@ -13,7 +14,10 @@ const applyAsDoctor = catchAsync(async (req: Request, res: Response) => {
 //   console.log({resume,additionalFiles,data})
   
   if(!zodValidationResult.success){
-    throw new Error(zodValidationResult.error.issues[0].message)
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      zodValidationResult.error.issues[0].message,
+    )
   }
   const payload=zodValidationResult.data
 

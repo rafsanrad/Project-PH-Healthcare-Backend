@@ -2,6 +2,7 @@ import bcrypt from "bcryptjs";
 import type { JwtPayload, SignOptions } from "jsonwebtoken";
 import crypto from "crypto";
 import path from "path";
+import httpStatus from "http-status"
 import {
   AuthProvider,
   Role,
@@ -24,6 +25,7 @@ import { type TokenPayload } from "google-auth-library";
 import { googleClient } from "../../lib/googleAuth";
 import { redisClient } from "../../lib/redis";
 import { transporter } from "../../lib/nodemailer";
+import { AppError } from "../../utils/AppError";
 
 const registerPatient = async (payload: IRegisterPatientPayload) => {
   const { name, password, patient: patientData } = payload;
@@ -103,23 +105,23 @@ const verifyPatientEmail = async (payload: IVerifyEmailPayload) => {
   });
 
   if (isUserExists?.status === "BLOCKED") {
-    throw new Error("User Is Blocked.");
+    throw new AppError(httpStatus.BAD_REQUEST, "User Is Blocked.");
   }
   if (isUserExists?.emailVerified) {
-    throw new Error("Email Already Verified.");
+    throw new AppError(httpStatus.BAD_REQUEST, "Email Already Verified.");
   }
   if (isUserExists?.isDeleted || isUserExists?.status === "DELETED") {
-    throw new Error("User Is Deleted.");
+    throw new AppError(httpStatus.BAD_REQUEST, "User Is Deleted.");
   }
 
   const otpKey = `patient-registration-otp:${email}`;
   const redisOtp = await redisClient.get(otpKey);
 
   if (!redisOtp) {
-    throw new Error("Invalid OTP");
+    throw new AppError(httpStatus.BAD_REQUEST, "Invalid OTP");
   }
   if (redisOtp !== otp) {
-    throw new Error("OTP does not match.");
+    throw new AppError(httpStatus.BAD_REQUEST, "OTP does not match.");
   }
 
   await redisClient.del(otpKey);
@@ -127,7 +129,7 @@ const verifyPatientEmail = async (payload: IVerifyEmailPayload) => {
   const patientRegistrationKey = `patient-registration-data:${email}`;
   const redisPatientData = await redisClient.get(patientRegistrationKey);
   if (!redisPatientData) {
-    throw new Error("Patient Doesn't Exist");
+    throw new AppError(httpStatus.BAD_REQUEST, "Patient Doesn't Exist");
   }
   const patientPayload: IRegisterPatientPayload = JSON.parse(redisPatientData);
   const createdUser = await prisma.user.create({
@@ -208,19 +210,21 @@ const loginUser = async (payload: ILoginUserPayload) => {
   });
 
   if (!user) {
-    throw new Error("User not found");
+    // throw new Error("User not found");
+    throw new AppError(httpStatus.NOT_FOUND,"User not found");
   }
 
   if (user.status === UserStatus.BLOCKED) {
-    throw new Error("User is blocked");
+    throw new AppError(httpStatus.UNAUTHORIZED, "User is blocked");
   }
 
   if (user.isDeleted || user.status === UserStatus.DELETED) {
-    throw new Error("User is deleted");
+    throw new AppError(httpStatus.UNAUTHORIZED, "User is deleted");
   }
 
   if (user.password === null && user.googleId != null) {
-    throw new Error(
+    throw new AppError(
+      httpStatus.UNAUTHORIZED,
       "User Already Has Account Registered With Gooogle.Try To Login With Google.",
     );
   }
@@ -231,7 +235,7 @@ const loginUser = async (payload: ILoginUserPayload) => {
   );
 
   if (!isPasswordMatched) {
-    throw new Error("Invalid credentials");
+    throw new AppError(httpStatus.UNAUTHORIZED, "Invalid credentials");
   }
 
   const jwtPayload = {
@@ -273,7 +277,7 @@ const getMe = async (user: IRequestUser) => {
   });
 
   if (!isUserExists) {
-    throw new Error("User not found");
+    throw new AppError(httpStatus.UNAUTHORIZED, "User not found");
   }
 
   return isUserExists;
@@ -286,10 +290,11 @@ const refreshToken = async (token: string) => {
   );
 
   if (!verifiedRefreshToken.success || !verifiedRefreshToken.data) {
-    throw new Error(
-      config.node_env === "development"
+    throw new AppError(
+      httpStatus.UNAUTHORIZED,
+      (config.node_env === "development"
         ? verifiedRefreshToken.error
-        : "Invalid refresh token",
+        : "Invalid refresh token") as string,
     );
   }
 
@@ -300,7 +305,10 @@ const refreshToken = async (token: string) => {
   });
 
   if (!user || user.isDeleted || user.status !== UserStatus.ACTIVE) {
-    throw new Error("User is inactive or not found");
+    throw new AppError(
+      httpStatus.UNAUTHORIZED,
+      "User is inactive or not found",
+    );
   }
 
   const jwtPayload = {
@@ -338,19 +346,30 @@ const googleLogin = async (payload: IGoogleLoginPayload) => {
     googleIdTokenPayload = ticket.getPayload();
   } catch (error) {
     console.log("Google Id Token Verification Failed", error);
-    throw new Error("Invalid or Expired Google Id Token");
+    throw new AppError(
+      error instanceof Error && "config" in error
+        ? httpStatus.SERVICE_UNAVAILABLE
+        : httpStatus.UNAUTHORIZED,
+      "Invalid or Expired Google Id Token",
+    );
   }
 
   if (!googleIdTokenPayload) {
-    throw new Error("Invalid or Expired Google Id Token");
+    throw new AppError(
+      httpStatus.UNAUTHORIZED,
+      "Invalid or Expired Google Id Token",
+    );
   }
 
   if (!googleIdTokenPayload.email) {
-    throw new Error("Google Email Not Found");
+    throw new AppError(httpStatus.UNAUTHORIZED, "Google Email Not Found");
   }
 
   if (!googleIdTokenPayload.name) {
-    throw new Error("Google Email User Name Not Found");
+    throw new AppError(
+      httpStatus.UNAUTHORIZED,
+      "Google Email User Name Not Found",
+    );
   }
 
   const ifPatientExistWithGoogleAuth = await prisma.user.findUnique({
@@ -373,18 +392,18 @@ const googleLogin = async (payload: IGoogleLoginPayload) => {
 
     if (ifPatientExistWithCredentials) {
       if (!ifPatientExistWithCredentials.emailVerified) {
-        throw new Error("Email Not Verified");
+        throw new AppError(httpStatus.FORBIDDEN, "Email Not Verified");
       }
 
       if (ifPatientExistWithCredentials.status === UserStatus.BLOCKED) {
-        throw new Error("User is Blocked");
+        throw new AppError(httpStatus.FORBIDDEN, "User is Blocked");
       }
 
       if (
         ifPatientExistWithCredentials.isDeleted ||
         ifPatientExistWithCredentials.status === UserStatus.DELETED
       ) {
-        throw new Error("User is Deleted");
+        throw new AppError(httpStatus.FORBIDDEN, "User is Deleted");
       }
 
       user = await prisma.user.update({
@@ -439,11 +458,11 @@ const googleLogin = async (payload: IGoogleLoginPayload) => {
   }
 
   if (user.status === UserStatus.BLOCKED) {
-    throw new Error("User is Blocked");
+    throw new AppError(httpStatus.FORBIDDEN, "User is Blocked");
   }
 
   if (user.isDeleted || user.status === UserStatus.DELETED) {
-    throw new Error("User is Deleted");
+    throw new AppError(httpStatus.FORBIDDEN, "User is Deleted");
   }
 
   const jwtPayload = {
@@ -534,29 +553,32 @@ const resetPassword = async (payload: IResetPasswordPayload) => {
     },
   });
   if (!isUserExists) {
-    throw new Error("User Does Not Exist.");
+    throw new AppError(httpStatus.BAD_REQUEST, "User Does Not Exist.");
   }
   if (isUserExists.status === "BLOCKED") {
-    throw new Error("User Is Blocked.");
+    throw new AppError(httpStatus.BAD_REQUEST, "User Is Blocked.");
   }
   if (!isUserExists.emailVerified) {
-    throw new Error("User not verified.");
+    throw new AppError(httpStatus.BAD_REQUEST, "User not verified.");
   }
   if (isUserExists.isDeleted || isUserExists.status === "DELETED") {
-    throw new Error("User Is Deleted.");
+    throw new AppError(httpStatus.BAD_REQUEST, "User Is Deleted.");
   }
   if (isUserExists.authProvider === "GOOGLE" && isUserExists.googleId) {
-    throw new Error("User Has Acccount With Google.");
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      "User Has Acccount With Google.",
+    );
   }
 
   const key = `forgot-password-otp:${isUserExists.email}`;
   const redisOtp = await redisClient.get(key);
 
   if (!redisOtp) {
-    throw new Error("Invalid OTP");
+    throw new AppError(httpStatus.BAD_REQUEST, "Invalid OTP");
   }
   if (redisOtp !== otp) {
-    throw new Error("OTP does not match.");
+    throw new AppError(httpStatus.BAD_REQUEST, "OTP does not match.");
   }
 
   const hashedPassword = await bcrypt.hash(

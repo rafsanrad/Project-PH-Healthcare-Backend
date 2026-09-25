@@ -1,6 +1,8 @@
 import { UploadApiResponse } from "cloudinary";
+import httpStatus from "http-status";
 import { cloudinary } from "../../lib/cloudinary";
 import { prisma } from "../../lib/prisma";
+import { AppError } from "../../utils/AppError";
 
 const uploadProfileImage = async (buffer: Buffer, userId: string) => {
   //retrive previous image if have
@@ -27,7 +29,12 @@ const uploadProfileImage = async (buffer: Buffer, userId: string) => {
               return reject(error);
             }
             if (!result) {
-              return reject(new Error("No result returned from cloudinary"));
+              return reject(
+                new AppError(
+                  httpStatus.BAD_GATEWAY,
+                  "No result returned from cloudinary",
+                ),
+              );
             }
             resolve(result);
           },
