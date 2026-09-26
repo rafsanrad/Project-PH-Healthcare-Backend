@@ -292,6 +292,7 @@ const bookAppointmentCallback = async (query: Record<string, any>) => {
 
 		if (status === "success") {
 
+      
 			const appointment = await prisma.appointment.findUnique({
 				where : {
 					id: executedPaymentResult.merchantInvoiceNumber

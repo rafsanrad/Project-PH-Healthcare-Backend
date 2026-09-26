@@ -5,6 +5,7 @@ import { validateRequest } from "../../middleware/validateRequest";
 import { AppointmentController } from "./appointment.controller";
 import { BookAppointmentValidationZodSchema, UpdateAppointmentStatusValidationZodSchema } from "./appointment.validation";
 
+
 const router = Router();
 
 router.post(
