@@ -251,6 +251,7 @@ const payAppointment = async (payload: IPayAppointmentPayload, user: RequestUser
 	};
 };
 
+//bkash pathacche
 const bookAppointmentCallback = async (query: Record<string, any>) => {
 	const transactionResult = await prisma.$transaction(async (tx) => {
 		const paymentId = query.paymentID;
