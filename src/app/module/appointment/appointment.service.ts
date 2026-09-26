@@ -292,7 +292,7 @@ const bookAppointmentCallback = async (query: Record<string, any>) => {
 
 		if (status === "success") {
 
-      
+
 			const appointment = await prisma.appointment.findUnique({
 				where : {
 					id: executedPaymentResult.merchantInvoiceNumber
@@ -521,7 +521,7 @@ const cancelAppointment = async (payload: ICancelAppointmentPayload, user : Requ
 			}
 		})
 
-		// refund process
+		// refund process continue
 		const now = new Date();
 		const startDateTime = existingAppointment.schedule.startDateTime; // 25 August : 3:00 PM
 
