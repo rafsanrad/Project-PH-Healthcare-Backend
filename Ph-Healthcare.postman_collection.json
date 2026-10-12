@@ -1,0 +1,1970 @@
+{
+  "info": {
+    "_postman_id": "d143c066-f477-42a8-9f57-903ffecd7980",
+    "name": "L2B7 Ph-Healthcare V2",
+    "description": "Every endpoint exposed by the PH Healthcare backend (Express + Prisma + Redis + bKash + Cloudinary).\n\n**Auth** is set at the collection level as `Bearer {{accessToken}}`, so protected requests need no manual header — only the public ones are marked `noauth`. The backend `auth()` middleware also accepts the `accessToken` cookie, but the cookie is issued with `sameSite: \"none\"` + `secure: false`, which Postman will not store over plain HTTP. Hence the bearer header.\n\n**A pre-request script on the collection** recomputes `{{todayStart}}`, `{{todayEnd}}`, `{{updatedStart}}`, `{{updatedEnd}}` and `{{todayDate}}` before every request. Never hard-code dates: the backend only lets a patient book a schedule that is on *today* and has *not started yet*, and only allows a doctor one schedule per calendar day.\n\n**IDs are captured automatically.** `Apply As Doctor` → `doctorId` + `doctorEmail`, `Verify Email` → `userId` + `patientId`, `Create Schedule` → `scheduleId`, `Get My Appointments` / `Get Doctor Appointments` → `appointmentId`, `Get My Payments` → `paymentId`. Nothing needs to be copied by hand as long as those requests are run first. `{{todayDate}}` (the `YYYY-MM-DD` of the generated schedule window) is also available for ad-hoc queries.\n\n**Suggested run order**\n1. `Auth` → *Register Patient* → *Verify Email* (paste the emailed OTP into `{{otp}}`) — you are now a logged-in PATIENT.\n2. `Doctor` → *Apply As Doctor* → *Verify Doctor Email* → log out of the collection by running *Credential Login* with the **admin** account → *Approve Doctor*.\n3. `Schedule` → *Create Schedule* → *Publish Schedule* (as the doctor).\n4. `Appointment` → *Book Appointment* (as the patient) → open the returned `paymentUrl`, finish bKash checkout so the browser is redirected to the callback and the appointment flips to `CONFIRMED`.\n5. `Appointment` → *Update Appointment Status* twice (as the doctor) to reach `COMPLETED`, then `Prescription` → *Create Prescription*.\n\n`Get Me`, `Payment` and `Analytics` are role-scoped, so run them with the matching account logged in.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "28720851"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{accessToken}}",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "packages": {},
+        "requests": {},
+        "exec": [
+          "// Runtime date helpers.",
+          "// The backend only accepts a schedule that is on TODAY and has not started yet,",
+          "// and it allows a doctor only one schedule per calendar day, so the schedule",
+          "// demo payloads are generated at request time instead of being hard-coded.",
+          "// All values are formatted in the server's local timezone.",
+          "const pad = (n) => String(n).padStart(2, \"0\");",
+          "const iso = (d) =>",
+          "    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.000`;",
+          "",
+          "const now = new Date();",
+          "",
+          "// Aim for a window starting 2 hours from now. If that would cross midnight",
+          "// (i.e. it is already late evening), fall back to 10:00 the next morning.",
+          "let start = new Date(now.getTime() + 2 * 60 * 60 * 1000);",
+          "if (start.getDate() !== now.getDate()) {",
+          "    start = new Date(now);",
+          "    start.setDate(start.getDate() + 1);",
+          "    start.setHours(10, 0, 0, 0);",
+          "}",
+          "",
+          "// 60 minutes / 20 minutes per slot => 3 slots. 240 minutes => 12 slots.",
+          "pm.collectionVariables.set(\"todayStart\", iso(start));",
+          "pm.collectionVariables.set(\"todayEnd\", iso(new Date(start.getTime() + 60 * 60 * 1000)));",
+          "pm.collectionVariables.set(\"updatedStart\", iso(start));",
+          "pm.collectionVariables.set(\"updatedEnd\", iso(new Date(start.getTime() + 4 * 60 * 60 * 1000)));",
+          "pm.collectionVariables.set(\"todayDate\", iso(start).slice(0, 10));"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register Patient",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"name\": \"Samin Ravi\",\n    \"email\": \"mentor.saminravi@gmail.com\",\n    \"password\": \"aA@@@12345678\",\n    \"patient\": {\n        \"contactNumber\": \"+8801700000000\"\n    }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/register",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "register"
+              ]
+            },
+            "description": "Expected: **201** with `data: null`. Creates a `User` (`role: PATIENT`, `emailVerified: false`) plus a `Patient` row, then emails a 6-digit OTP. No tokens are issued yet — run **Verify Email** next.\n\nField rules (Zod):\n- `name` — 3 to 20 characters\n- `email` — valid email, must not already exist\n- `password` — 8 to 20 characters, must contain an uppercase letter, a lowercase letter, a digit and one of `!@#$%^&*`\n- `patient` — optional object, and only `contactNumber` is accepted at this stage\n\nUse a fresh email every run, otherwise this returns 500 (\"User Already Exists With This Email\")."
+          },
+          "response": []
+        },
+        {
+          "name": "Verify Email",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {},
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "if (res && res.data && res.data.accessToken) {",
+                  "    pm.collectionVariables.set(\"accessToken\", res.data.accessToken);",
+                  "    pm.collectionVariables.set(\"refreshToken\", res.data.refreshToken || \"\");",
+                  "}",
+                  "if (res && res.data && res.data.user && res.data.user.id) {",
+                  "    pm.collectionVariables.set(\"userId\", res.data.user.id);",
+                  "}",
+                  "if (res && res.data && res.data.patient && res.data.patient.id) {",
+                  "    pm.collectionVariables.set(\"patientId\", res.data.patient.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"email\": \"mentor.saminravi@gmail.com\",\n    \"otp\": \"{{otp}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/verify-email",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "verify-email"
+              ]
+            },
+            "description": "Expected: **201** with `data: { accessToken, refreshToken, user, patient }`.\n\n`otp` must be exactly the 6 digits emailed by **Register Patient** — replace the `{{otp}}` collection variable with it (default value `123456` is a placeholder only). The tokens are also set as `accessToken` / `refreshToken` cookies.\n\nThe test script stores `accessToken`, `refreshToken`, `userId` and `patientId` as collection variables, which is what makes every later protected request work.\n\nFailure cases: expired/unknown OTP → 400, already verified → 400."
+          },
+          "response": []
+        },
+        {
+          "name": "Credential Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {},
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "if (res && res.data && res.data.accessToken) {",
+                  "    pm.collectionVariables.set(\"accessToken\", res.data.accessToken);",
+                  "    pm.collectionVariables.set(\"refreshToken\", res.data.refreshToken || \"\");",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"email\": \"mentor.saminravi@gmail.com\",\n    \"password\": \"aA@@@12345678\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Expected: **200** with `data: { accessToken, refreshToken }` (also set as cookies). The test script stores both as collection variables.\n\nThe demo body logs in as the **PATIENT** created by *Register Patient* / *Verify Email*. `password` obeys the same 8–20 char + upper + lower + digit + special rule.\n\nUse **Login As Doctor (Seeded)** or **Login As Admin (Seeded)** for the role-scoped endpoints.\n\nFailure cases: unknown email → 404, `status: BLOCKED` → 403, soft-deleted account → 404, Google-only account with no password → 400, wrong password → 401."
+          },
+          "response": []
+        },
+        {
+          "name": "Login As Doctor (Seeded)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {},
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "if (res && res.data && res.data.accessToken) {",
+                  "    pm.collectionVariables.set(\"accessToken\", res.data.accessToken);",
+                  "    pm.collectionVariables.set(\"refreshToken\", res.data.refreshToken || \"\");",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"email\": \"{{testerDoctorEmail}}\",\n    \"password\": \"{{testerDoctorPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Expected: **200**. Logs in as the doctor that `server.ts` seeds on boot (`seedTesterDoctor`), which is the fastest way to reach the doctor-only endpoints without waiting on admin approval.\n\nCredentials come from the collection variables `{{testerDoctorEmail}}` / `{{testerDoctorPassword}}` (`.env`: `TESTER_DOCTOR_EMAIL`, `TESTER_DOCTOR_PASSWORD`).\n\nNote: `seed.ts` currently hashes `TESTER_ADMIN_PASSWORD` for the doctor account, so the value that actually works is the **admin** password. If login returns 401, set `{{testerDoctorPassword}}` to the admin password from `.env`.\n\nThe seeded doctor row is created with `verificationStatus: PENDING`, so it will not show up in the `/doctor/public/...` endpoints until an admin approves it."
+          },
+          "response": []
+        },
+        {
+          "name": "Login As Admin (Seeded)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {},
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "if (res && res.data && res.data.accessToken) {",
+                  "    pm.collectionVariables.set(\"accessToken\", res.data.accessToken);",
+                  "    pm.collectionVariables.set(\"refreshToken\", res.data.refreshToken || \"\");",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"email\": \"{{testerAdminEmail}}\",\n    \"password\": \"{{testerAdminPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Expected: **200**. Logs in as the admin that `server.ts` seeds on boot (`seedTesterAdmin`) — required by **Approve Doctor**, **Get All Doctors (Admin)**, **Get All Schedules (Admin)**, **Get All Appointments (Admin)**, **Get All Payments (Admin)** and **Get Admin Analytics**.\n\nCredentials come from `{{testerAdminEmail}}` / `{{testerAdminPassword}}` (`.env`: `TESTER_ADMIN_EMAIL`, `TESTER_ADMIN_PASSWORD`). Swap them for the `SUPER_ADMIN_*` values to test the SUPER_ADMIN path — both roles are accepted everywhere an admin is."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Me",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/auth/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "me"
+              ]
+            },
+            "description": "Expected: **200** with the caller's own `User` row (`password` omitted) and the related `patient` object when the account is a PATIENT.\n\nGated by `auth(ADMIN, DOCTOR, PATIENT, SUPER_ADMIN)`, so every role passes — the gate effectively just means \"authenticated\". No token → 401, expired/invalid token → 401, user no longer in the DB → 401, `status: BLOCKED` → 403."
+          },
+          "response": []
+        },
+        {
+          "name": "Refresh Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {},
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "if (res && res.data && res.data.accessToken) {",
+                  "    pm.collectionVariables.set(\"accessToken\", res.data.accessToken);",
+                  "    pm.collectionVariables.set(\"refreshToken\", res.data.refreshToken || \"\");",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/auth/refresh-token",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "refresh-token"
+              ]
+            },
+            "description": "Expected: **200** with a new `data: { accessToken, refreshToken }` pair, also re-issued as cookies.\n\nThere is **no request body** — the controller reads the `refreshToken` cookie only, and 401s with \"Refresh token is missing\" if it is absent. Because the cookie is `sameSite: \"none\"` + `secure: false`, Postman will often drop it over plain HTTP. Workaround: send the token manually as `Cookie: refreshToken={{refreshToken}}` (or switch the app to `sameSite: \"lax\"` for local dev).\n\nThe test script keeps `{{accessToken}}` in sync with the rotated pair."
+          },
+          "response": []
+        },
+        {
+          "name": "Forgot Password",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"email\": \"saminravi.ph@gmail.com\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/forgot-password",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "forgot-password"
+              ]
+            },
+            "description": "Expected: **200** with `data: null` and the message `OTP sent to email : <email>`. Emails a 6-digit OTP that is consumed by **Reset Password**.\n\nNote: unlike login, an unknown email is not special-cased here — make sure the address exists before testing."
+          },
+          "response": []
+        },
+        {
+          "name": "Reset Password",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"email\": \"saminravi.ph@gmail.com\",\n    \"newPassword\": \"aA@@@12345678\",\n    \"otp\": \"{{otp}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/reset-password",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "reset-password"
+              ]
+            },
+            "description": "Expected: **200** with `data: null`.\n\n- `email` — the account to update\n- `newPassword` — 8 to 20 characters with an uppercase letter, a lowercase letter, a digit and one of `!@#$%^&*`\n- `otp` — exactly 6 digits, the one emailed by **Forgot Password**\n\nAfter this, log in again with `newPassword` to refresh `{{accessToken}}`."
+          },
+          "response": []
+        }
+      ],
+      "description": "All nine credential-auth endpoints under `/api/v1/auth` (8 routes + a role-specific login helper). The password rule enforced by Zod on register/login/reset is: 8–20 characters, at least one lowercase, one uppercase, one digit and one special character from `!@#$%^&*`."
+    },
+    {
+      "name": "Auth - Google",
+      "item": [
+        {
+          "name": "Google Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {},
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "if (res && res.data && res.data.accessToken) {",
+                  "    pm.collectionVariables.set(\"accessToken\", res.data.accessToken);",
+                  "    pm.collectionVariables.set(\"refreshToken\", res.data.refreshToken || \"\");",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"idToken\": \"<google-id-token-from-frontend-sign-in>\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/google",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "google"
+              ]
+            },
+            "description": "Expected: **200**, returning the app's own `accessToken` / `refreshToken` (body + cookies). The test script stores both as collection variables.\n\n`idToken` must be a **real** Google ID token — it is verified against `GOOGLE_CLIENT_ID`, so a made-up string returns 401. Get one from the frontend's Google Sign-In (the `credential` field of the response).\n\nServer-side resolution order:\n1. known `googleId` (matched on the stable `sub` claim) → that user is logged in;\n2. an existing account with the same email gets linked — `googleId` stored, `emailVerified` forced to `true`, any existing password preserved;\n3. otherwise a brand new `PATIENT` user + `Patient` row is provisioned.\n\nThe body field is `idToken` (camelCase), not `token`. See `GOOGLE-LOGIN-TESTING.md` in the repo for how to obtain a token for manual testing."
+          },
+          "response": []
+        }
+      ],
+      "description": "ID-token verification only. The frontend runs Google Sign-In, gets an ID token and POSTs it here; the server verifies it and issues its own JWTs. Google is never contacted again after this call."
+    },
+    {
+      "name": "User",
+      "item": [
+        {
+          "name": "Upload Profile Image",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "profileImage",
+                  "type": "file",
+                  "uuid": "a1b2c3d4-0000-4000-8000-000000000001",
+                  "src": "/absolute/path/to/profile-picture.jpg"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/user/profile-image",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "user",
+                "profile-image"
+              ]
+            },
+            "description": "Expected: **200**. `multipart/form-data` with a single `profileImage` file. Any authenticated role (ADMIN / DOCTOR / PATIENT / SUPER_ADMIN).\n\nUploads the buffer to Cloudinary and writes `user.imageUrl` / `user.imagePublicId`; if the user already had an image, the previous Cloudinary asset is destroyed first.\n\nPick a real jpg/png before sending — the stored `src` is only a placeholder. Missing file → 400 \"No file provided\".\n\nHeads-up: the endpoint currently answers with the message `\"New tokens generated successfully\"` (copy-paste from the auth controller) even though no tokens are issued — the `data` payload is the correct indication of success."
+          },
+          "response": []
+        }
+      ],
+      "description": "The single `/api/v1/user` endpoint. Multipart bodies in this collection always upload through Cloudinary, so Cloudinary env vars must be valid."
+    },
+    {
+      "name": "Doctor",
+      "item": [
+        {
+          "name": "Apply As Doctor",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {},
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "if (res && res.data && res.data.doctor && res.data.doctor.id) {",
+                  "    pm.collectionVariables.set(\"doctorId\", res.data.doctor.id);",
+                  "    pm.collectionVariables.set(\"doctorEmail\", res.data.doctor.email);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "resume",
+                  "type": "file",
+                  "uuid": "a1b2c3d4-0000-4000-8000-000000000002",
+                  "src": "/absolute/path/to/resume.pdf"
+                },
+                {
+                  "key": "additionalFiles",
+                  "type": "file",
+                  "uuid": "a1b2c3d4-0000-4000-8000-000000000003",
+                  "src": [
+                    "/absolute/path/to/certificate1.pdf",
+                    "/absolute/path/to/certificate2.pdf"
+                  ]
+                },
+                {
+                  "key": "data",
+                  "type": "text",
+                  "uuid": "a1b2c3d4-0000-4000-8000-000000000004",
+                  "value": "{\n  \"user\": {\n    \"name\": \"Dr. Sarah Jenkins\",\n    \"email\": \"dr.sarah.jenkins@example.com\"\n  },\n  \"doctor\": {\n    \"address\": \"123 Medical Plaza, Suite 400, New York, NY\",\n    \"specialization\": \"Cardiology\",\n    \"licenseNumber\": \"MED-2026-98765\",\n    \"qualifications\": \"MD, FACC - Harvard Medical School\",\n    \"experienceYears\": 12,\n    \"bio\": \"Dedicated cardiologist with over a decade of experience specializing in non-invasive cardiovascular imaging and preventative heart care.\",\n    \"consultationFee\": 150,\n    \"contactNumber\": \"+1-555-0199\"\n  }\n}"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/doctor/apply-as-doctor",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "doctor",
+                "apply-as-doctor"
+              ]
+            },
+            "description": "Expected: **200** with the created user (including its `doctor` row). No auth on this route.\n\n`multipart/form-data` with three parts:\n- `resume` — **one file, effectively required**. The controller pipes `req.files.resume[0].buffer` straight into Cloudinary, so a missing resume blows up instead of returning a clean 400.\n- `additionalFiles` — up to **10** files (certificates, transcripts…). Optional; the key may be omitted entirely.\n- `data` — a **JSON string**, not a nested set of form fields. The controller does `JSON.parse(req.body.data)` then validates it with `ApplyAsDoctorValidationZodSchema`, so it must be one minified/pretty JSON document.\n\n`data` shape:\n```\n{\n  \"user\":   { \"name\": \"...\", \"email\": \"...\" },\n  \"doctor\": {\n    \"address\":         \"...\",   // optional, min 5 chars\n    \"specialization\":  \"...\",   // required, min 2\n    \"licenseNumber\":   \"...\",   // required, min 3, must be unique\n    \"qualifications\":  \"...\",   // required, min 2\n    \"experienceYears\": 12,      // required, integer >= 0 (JSON number, not \"12\")\n    \"bio\":             \"...\",   // optional, max 1000 chars\n    \"consultationFee\": 150,     // optional, number >= 0 (JSON number, not \"150\")\n    \"contactNumber\":   \"...\"    // optional, min 5 chars\n  }\n}\n```\n\nSide effects: creates a `User` (`role: DOCTOR`, random 8-character temp password, `needPasswordChange: true`, `emailVerified: false`) + a `Doctor` row (`verificationStatus: PENDING`), uploads all files to Cloudinary, and emails a 6-digit OTP with a 1 hour TTL to the doctor's address for **Verify Doctor Email**.\n\nUse a fresh `email` and `licenseNumber` per run — duplicates fail.\n\nThe test script captures `{{doctorId}}` and `{{doctorEmail}}` for **Verify Doctor Email** and **Approve Doctor**."
+          },
+          "response": []
+        },
+        {
+          "name": "Verify Doctor Email",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"email\": \"{{doctorEmail}}\",\n    \"otp\": \"{{doctorOtp}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/doctor/apply-as-doctor/verify-email",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "doctor",
+                "apply-as-doctor",
+                "verify-email"
+              ]
+            },
+            "description": "Expected: **200** with the updated user (password omitted) and the `doctor` row. No auth on this route, and the request body is not Zod-validated, so a wrong shape surfaces as a 500.\n\n- `email` — must match the `Apply As Doctor` email (lower-cased/trimmed server-side); prefilled from `{{doctorEmail}}`.\n- `otp` — the 6 digits emailed by **Apply As Doctor**, 1 hour TTL; set the `{{doctorOtp}}` collection variable to it.\n\nSets `user.emailVerified: true` and deletes the Redis OTP key. The application still needs an admin decision (**Approve Doctor**) before the doctor can be listed publicly or use doctor-only endpoints.\n\nFailure cases: no such doctor → 400, already verified → 400, expired OTP → 400, mismatch → 400."
+          },
+          "response": []
+        },
+        {
+          "name": "Approve Doctor",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"doctorId\": \"{{doctorId}}\",\n    \"verificationStatus\": \"APPROVED\",\n    \"rejectionReason\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/doctor/approve-doctor",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "doctor",
+                "approve-doctor"
+              ]
+            },
+            "description": "Expected: **200**. ADMIN / SUPER_ADMIN only (run **Login As Admin (Seeded)** first — the `{{accessToken}}` variable is shared collection-wide).\n\nBody:\n- `doctorId` — prefilled from `{{doctorId}}`, captured by **Apply As Doctor**\n- `verificationStatus` — `\"APPROVED\"` or `\"REJECTED\"`\n- `rejectionReason` — **required** when rejecting; ignored (stored as `null`) when approving, so `\"\"` is safe\n\nTo demo a rejection, send:\n```\n{\n  \"doctorId\": \"{{doctorId}}\",\n  \"verificationStatus\": \"REJECTED\",\n  \"rejectionReason\": \"Your BMDC registration certificate could not be verified.\"\n}\n```\n\nRecords `reviewedBy` (the admin's userId) and `reviewedAt`, then emails the doctor an approval or rejection notice.\n\nFailure cases: unknown doctor → 404, soft-deleted → 410, email not verified yet → 409, already reviewed → 409, rejecting without a reason → 400."
+          },
+          "response": []
+        },
+        {
+          "name": "Get All Doctors (Admin)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {},
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "if (res && Array.isArray(res.data) && res.data.length) {",
+                  "    if (!pm.collectionVariables.get(\"doctorId\") && res.data[0].id) {",
+                  "        pm.collectionVariables.set(\"doctorId\", res.data[0].id);",
+                  "    }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/doctor/all-doctors?page=1&limit=10&sortBy=createdAt&sortOrder=desc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "doctor",
+                "all-doctors"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "sortBy",
+                  "value": "createdAt"
+                },
+                {
+                  "key": "sortOrder",
+                  "value": "desc"
+                },
+                {
+                  "key": "searchTerm",
+                  "value": "cardio",
+                  "disabled": true
+                },
+                {
+                  "key": "specialization",
+                  "value": "Cardiology",
+                  "disabled": true
+                },
+                {
+                  "key": "email",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "licenseNumber",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "verificationStatus",
+                  "value": "PENDING",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Expected: **200**, paginated (`meta: { page, limit, total, totalPages }`). ADMIN / SUPER_ADMIN only. Every non-deleted doctor regardless of verification status, each with its linked `user` (password omitted) so you can read `emailVerified`, `status` and `needPasswordChange`.\n\nQuery params (all optional; defaults are `page=1`, `limit=10`, `sortBy=createdAt`, `sortOrder=desc`):\n- `searchTerm` — matches doctor name, email or specialization (case-insensitive `contains`)\n- `specialization` — exact match, case-insensitive\n- `email` — partial match, case-insensitive\n- `licenseNumber` — exact match, case-insensitive\n- `verificationStatus` — `PENDING` / `APPROVED` / `REJECTED`\n\nThe test script fills `{{doctorId}}` with the first result when it is still empty, so a fresh collection can chain straight into **Get Single Doctor Profile (Public)**."
+          },
+          "response": []
+        },
+        {
+          "name": "Update My Doctor Profile",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"address\": \"456 New Clinic Road, Suite 12, Dhaka\",\n    \"bio\": \"Updated bio describing focus areas and patient philosophy.\",\n    \"consultationFee\": 175,\n    \"contactNumber\": \"+1-555-0110\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/doctor/update-my-profile",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "doctor",
+                "update-my-profile"
+              ]
+            },
+            "description": "Expected: **200** with the updated `Doctor` row. DOCTOR only — it looks the profile up by `userId` from the token, so there is no id in the path and you can only ever edit your own record.\n\nEvery field is optional, and only the keys you send are touched. Send `{}` for a no-op. Constraints:\n- `address` — min 5 characters\n- `bio` — max 1000 characters\n- `consultationFee` — number `>= 0` (send a JSON number, not a quoted string)\n- `contactNumber` — min 5 characters\n\n`specialization`, `licenseNumber`, `qualifications` and `experienceYears` are intentionally not editable here. No doctor profile → 404; validation failure → 400."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Available Doctors Today (Public)",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/doctor/public/available-today?page=1&limit=10&sortBy=createdAt&sortOrder=desc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "doctor",
+                "public",
+                "available-today"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "sortBy",
+                  "value": "createdAt"
+                },
+                {
+                  "key": "sortOrder",
+                  "value": "desc"
+                },
+                {
+                  "key": "searchTerm",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "specialization",
+                  "value": "",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Expected: **200**, paginated. No auth — this is the landing-page \"book today\" feed.\n\nReturns non-deleted `APPROVED` doctors that have **at least one** schedule which is `PUBLISHED`, starts later today, and still has `availableSlots > 0`. Each doctor is returned together with just the matching schedules for today, so the response is directly bookable.\n\nQuery params: `page`, `limit`, `sortBy`, `sortOrder`, plus optional `searchTerm` (name / email / specialization, case-insensitive) and `specialization` (exact, case-insensitive).\n\nTo see a non-empty result, first run **Create Schedule** + **Publish Schedule** as an approved doctor while the collection's `{{todayStart}}` window is still in the future."
+          },
+          "response": []
+        },
+        {
+          "name": "Get All Doctors (Public)",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/doctor/public/all-doctors?page=1&limit=10&sortBy=createdAt&sortOrder=desc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "doctor",
+                "public",
+                "all-doctors"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "sortBy",
+                  "value": "createdAt"
+                },
+                {
+                  "key": "sortOrder",
+                  "value": "desc"
+                },
+                {
+                  "key": "searchTerm",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "specialization",
+                  "value": "",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Expected: **200**, paginated. No auth. The public doctor directory: non-deleted, `APPROVED` doctors only, projected down to patient-safe fields — no `resume`, no `additionalFiles`, no `reviewedBy`/`reviewedAt`/`rejectionReason`, no `userId`, no `isDeleted`.\n\nQuery params: `page`, `limit`, `sortBy`, `sortOrder`, plus optional `searchTerm` (name / email / specialization, case-insensitive) and `specialization` (exact, case-insensitive).\n\nA freshly applied doctor will not appear here until an admin runs **Approve Doctor**."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Single Doctor Profile (Public)",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/doctor/public/{{doctorId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "doctor",
+                "public",
+                "{{doctorId}}"
+              ]
+            },
+            "description": "Expected: **200** with one doctor, **404** otherwise. No auth.\n\n`{{doctorId}}` is captured by **Apply As Doctor**, or filled from the first row of **Get All Doctors (Public)**. The `doctor` id is used here, not the `user` id.\n\n404 comes back for three different reasons: the doctor does not exist, is soft-deleted, or is not `APPROVED`. Like the list endpoint, the payload is limited to patient-safe fields (bio, qualifications, experience, consultation fee, contact number, address) with no resume/additional files and no review metadata."
+          },
+          "response": []
+        }
+      ],
+      "description": "All eight `/api/v1/doctor` endpoints: the apply → verify-email → admin-approve onboarding flow, admin/self-service management, and the three unauthenticated public discovery routes patients hit before logging in."
+    },
+    {
+      "name": "Schedule",
+      "item": [
+        {
+          "name": "Create Schedule",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {},
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "if (res && res.data && res.data.id) {",
+                  "    pm.collectionVariables.set(\"scheduleId\", res.data.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"startDateTime\": \"{{todayStart}}\",\n    \"endDateTime\": \"{{todayEnd}}\",\n    \"meetingLink\": \"https://meet.google.com/abc-defg-hij\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/create-schedule",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "schedule",
+                "create-schedule"
+              ]
+            },
+            "description": "Expected: **201** with the created `Schedule` including a slim `doctor` relation (`name`, `email`, `contactNumber`). DOCTOR only.\n\nBody (all three fields required, Zod-validated):\n- `startDateTime` / `endDateTime` — ISO-8601 date-times, coerced by Zod\n- `meetingLink` — a valid URL\n\nBusiness rules enforced server-side:\n- both timestamps must fall on the **same calendar day**, otherwise 409\n- `startDateTime` must not be after `endDateTime`, otherwise 409\n- the doctor may only have **one schedule per day** (soft-deleted ones do not count), otherwise 409\n- `totalSlots = floor(duration / 20 minutes)` and must be `>= 1`, so a slot needs at least a 20-minute window; `availableSlots` starts equal to `totalSlots`\n- `{{todayStart}}` → `{{todayEnd}}` is 60 minutes ⇒ `totalSlots: 3`\n\nThe schedule is created as `status: DRAFT`, so it is invisible to patients until you run **Publish Schedule**.\n\nThe test script stores `{{scheduleId}}`, which every later schedule/appointment request reuses."
+          },
+          "response": []
+        },
+        {
+          "name": "Get My Schedules",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {},
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "if (res && Array.isArray(res.data) && res.data.length) {",
+                  "    if (!pm.collectionVariables.get(\"scheduleId\")) {",
+                  "        pm.collectionVariables.set(\"scheduleId\", res.data[0].id);",
+                  "    }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/schedule/my-schedules?page=1&limit=10&sortBy=createdAt&sortOrder=desc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "schedule",
+                "my-schedules"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "sortBy",
+                  "value": "createdAt"
+                },
+                {
+                  "key": "sortOrder",
+                  "value": "desc"
+                },
+                {
+                  "key": "status",
+                  "value": "PUBLISHED",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Expected: **200**, paginated (`meta: { page, limit, total, totalPages }`). DOCTOR only — resolved from the token, so it is always the caller's own schedules, with the owning doctor and any booked `appointments` (with their `patient`) included.\n\nQuery params: `page`, `limit`, `sortBy`, `sortOrder` (defaults `page=1`, `limit=10`, `sortBy=createdAt`, `sortOrder=desc`) and `status` — `DRAFT` or `PUBLISHED`.\n\nNo doctor profile for the token → 404. The test script backfills `{{scheduleId}}` from the first row when it is empty."
+          },
+          "response": []
+        },
+        {
+          "name": "Get All Schedules (Admin)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/schedule/all-schedules?page=1&limit=10&sortBy=createdAt&sortOrder=desc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "schedule",
+                "all-schedules"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "sortBy",
+                  "value": "createdAt"
+                },
+                {
+                  "key": "sortOrder",
+                  "value": "desc"
+                },
+                {
+                  "key": "doctorId",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "email",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "status",
+                  "value": "PUBLISHED",
+                  "disabled": true
+                },
+                {
+                  "key": "searchTerm",
+                  "value": "",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Expected: **200**, paginated. ADMIN / SUPER_ADMIN only — every schedule across every doctor.\n\nQuery params (all optional):\n- `page`, `limit`, `sortBy`, `sortOrder`\n- `doctorId` — exact `Doctor` id\n- `email` — exact doctor email\n- `status` — `DRAFT` or `PUBLISHED`\n- `searchTerm` — case-insensitive match on doctor name, doctor email or specialization\n\nUseful for auditing slot usage (`totalSlots` vs `availableSlots`) before approving a doctor or refunding a patient."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Today's Schedules By Doctor",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/schedule/todays-schedule?doctorId={{doctorId}}&page=1&limit=10&sortBy=createdAt&sortOrder=desc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "schedule",
+                "todays-schedule"
+              ],
+              "query": [
+                {
+                  "key": "doctorId",
+                  "value": "{{doctorId}}"
+                },
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "sortBy",
+                  "value": "createdAt"
+                },
+                {
+                  "key": "sortOrder",
+                  "value": "desc"
+                }
+              ]
+            },
+            "description": "Expected: **200**, paginated.\n\n- `doctorId` — **required**. The demo value is `{{doctorId}}`, captured by **Apply As Doctor**. Omit it and the service throws **404** \"Doctor Id Must Be Provided In Query\" (the status is 404, not 400).\n- `page`, `limit`, `sortBy`, `sortOrder` — optional, same defaults as the other list endpoints.\n\nOnly schedules that are non-deleted, `PUBLISHED`, start **later today** (`startDateTime > now`, within today's window) and have `availableSlots > 0` come back — i.e. exactly what can still be booked. A 404 also comes back if the `doctorId` does not exist.\n\nNote: the route has **no `auth()` middleware**, so this works even unauthenticated, and unlike the `/doctor/public/...` routes it does not check the doctor's `APPROVED` status."
+          },
+          "response": []
+        },
+        {
+          "name": "Update Schedule",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"startDateTime\": \"{{updatedStart}}\",\n    \"endDateTime\": \"{{updatedEnd}}\",\n    \"meetingLink\": \"https://meet.google.com/abc-defg-hij\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/update-schedule/{{scheduleId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "schedule",
+                "update-schedule",
+                "{{scheduleId}}"
+              ]
+            },
+            "description": "Expected: **200** with the updated `Schedule`. DOCTOR only, and the schedule must belong to the caller (the query filters on `doctorId`).\n\n`{{scheduleId}}` is captured by **Create Schedule**.\n\nAll body fields are optional — omitted keys keep their current value, so `{}` is a valid no-op:\n- `startDateTime`, `endDateTime` — ISO-8601, Zod-coerced\n- `meetingLink` — valid URL\n\n`totalSlots` / `availableSlots` are recomputed from the new duration at 20 minutes per slot; `{{updatedStart}}` → `{{updatedEnd}}` is 4 hours ⇒ `totalSlots: 12`.\n\nThe same-day and start-before-end rules from **Create Schedule** are re-checked (409 on violation). Editing is only allowed while the schedule is `DRAFT`, or `PUBLISHED` with **no bookings yet**; a published schedule that already has appointments is rejected with 409, since the slot math would no longer line up. 404 if the schedule is not yours or does not exist."
+          },
+          "response": []
+        },
+        {
+          "name": "Publish Schedule",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/schedule/publish-schedule/{{scheduleId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "schedule",
+                "publish-schedule",
+                "{{scheduleId}}"
+              ]
+            },
+            "description": "Expected: **200** with the schedule now at `status: PUBLISHED`. DOCTOR only, own schedule only. No body.\n\n`{{scheduleId}}` is captured by **Create Schedule** (or backfilled by **Get My Schedules**).\n\nThis is the step that makes a schedule visible to patients: it shows up in **Get Available Doctors Today (Public)**, **Get Today's Schedules By Doctor**, and becomes bookable by **Book Appointment**.\n\nFailure cases: already `PUBLISHED` → 409, not found / not yours → 404. There is no un-publish endpoint, so to cancel a published slot use **Delete Schedule**."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Schedule By Id",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/schedule/{{scheduleId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "schedule",
+                "{{scheduleId}}"
+              ]
+            },
+            "description": "Expected: **200** with a single schedule, **404** if it does not exist. DOCTOR / ADMIN / SUPER_ADMIN.\n\n`{{scheduleId}}` comes from **Create Schedule**, **Get My Schedules** or **Get All Schedules (Admin)**.\n\nIncludes the owning doctor (subset of fields) and the booked `appointments` with their `patient`, which makes this the quickest way to see slot consumption (`totalSlots` - `availableSlots` = slots taken) and the per-appointment `joiningTime` / `serialNumber` assigned by the bKash callback.\n\nAny authenticated role in that list may read any schedule by id — unlike the appointment endpoints, this one is not restricted to the owner."
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Schedule",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/schedule/{{scheduleId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "schedule",
+                "{{scheduleId}}"
+              ]
+            },
+            "description": "Expected: **200** with the soft-deleted row (`isDeleted: true`, `deletedAt` set). DOCTOR only, own schedule only. No body.\n\n`{{scheduleId}}` is the id captured by **Create Schedule**.\n\nSoft delete, so the row and its id remain in the database — deleted schedules are filtered out of every list and lookup, and the \"one schedule per day\" check ignores them (so you can create a fresh one for the same date).\n\nFails with 409 if the schedule is `PUBLISHED` **and** `totalSlots !== availableSlots`, i.e. once somebody has booked it. A `DRAFT` schedule, or a published one nobody booked, deletes fine. 404 if it does not exist or is not yours."
+          },
+          "response": []
+        }
+      ],
+      "description": "All eight `/api/v1/schedule` endpoints: the doctor create → publish → manage lifecycle, admin oversight, and the patient-facing today's-schedule lookup. The date values in the demo bodies (`{{todayStart}}`, `{{todayEnd}}`, `{{updatedStart}}`, `{{updatedEnd}}`) are recomputed before every request by the collection-level pre-request script, so the payload is always bookable."
+    },
+    {
+      "name": "Appointment",
+      "item": [
+        {
+          "name": "Book Appointment",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {},
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "if (res && res.data && res.data.paymentUrl) {",
+                  "    console.log(\"Open this bKash payment URL to complete checkout:\", res.data.paymentUrl);",
+                  "}",
+                  "",
+                  "// The response only carries paymentUrl, so the appointment id has to be",
+                  "// picked up later from Get My Appointments (the test script there does it)."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"scheduleId\": \"{{scheduleId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/appointment/book-appointment",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "appointment",
+                "book-appointment"
+              ]
+            },
+            "description": "Expected: **200** with `data: { paymentUrl }` — the bKash checkout URL. PATIENT only.\n\nBody is a single field, `scheduleId`, prefilled from `{{scheduleId}}` (captured by **Create Schedule**).\n\nPreconditions, all checked server-side:\n- the caller has a `Patient` profile, otherwise 404\n- the schedule exists and is not soft-deleted, otherwise 404\n- `status: PUBLISHED` (run **Publish Schedule** first), otherwise 400\n- the schedule starts **today** (`isSameDay`), otherwise 400\n- the schedule has **not started yet**, otherwise 400\n- `availableSlots > 0`, otherwise 400\n- the patient must not already have a `PENDING` / `CONFIRMED` / `ONGOING` appointment for the same doctor + schedule (the `unique_appointment` constraint)\n\nSide effects, inside one transaction: an `Appointment` is created as `PENDING`, and a `Payment` row is created as `UNPAID` for `doctor.consultationFee` in `BDT` with a bKash `merchantInvoiceNumber` equal to the appointment id. The appointment only becomes `CONFIRMED` once the bKash callback lands.\n\nNext step: open the printed `paymentUrl` in a browser, pay, and bKash redirects to the callback URL — the response there confirms the booking, decrements `availableSlots`, assigns `serialNumber` + `joiningTime`, marks the payment `PAID` and emails a PDF invoice. `{{appointmentId}}` is not in this response; run **Get My Appointments** afterwards to capture it."
+          },
+          "response": []
+        },
+        {
+          "name": "Pay Appointment",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"appointmentId\": \"{{appointmentId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/appointment/pay-appointment",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "appointment",
+                "pay-appointment"
+              ]
+            },
+            "description": "Expected: **200** with `data: { paymentUrl }` again. PATIENT only.\n\nBody: `appointmentId`, prefilled from `{{appointmentId}}` (captured by **Get My Appointments**).\n\nUse this to re-issue a checkout URL for an appointment that is still `PENDING` — for example when the first bKash page was closed, or when the callback came back with `status=failure` / `status=cancel` and the payment row was flipped to `FAILED` / `CANCELLED`.\n\nOnly the owning patient can pay, and the appointment must still be `PENDING`; anything else (not found, wrong owner, already `CONFIRMED`/`CANCELLED`/`COMPLETED`) returns an error. Slot count is *not* decremented by this call — that only happens in the success branch of the callback."
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel Appointment",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"appointmentId\": \"{{appointmentId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/appointment/cancel-appointment",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "appointment",
+                "cancel-appointment"
+              ]
+            },
+            "description": "Expected: **200** with `data: { appointment, payment }`. PATIENT (own appointment only) / ADMIN / SUPER_ADMIN.\n\nBody: `appointmentId`, prefilled from `{{appointmentId}}`.\n\nSide effects:\n- the appointment becomes `CANCELLED`\n- the schedule slot is given back (`availableSlots` incremented), so the time becomes bookable again\n- if the appointment is cancelled **more than 1 hour before** `startDateTime` and the payment was `PAID`, a bKash refund is executed automatically; the payment flips to `REFUNDED` with `refundTrxId` / `refundAmount` / `refundReason` / `refundedAt` recorded. Inside that window the payment is simply `CANCELLED` and no money moves.\n\nFailure cases: 404 if the appointment (or its payment) does not exist, 403 if a patient tries to cancel somebody else's, 400 if it is already `CANCELLED` / `ONGOING` / `COMPLETED`."
+          },
+          "response": []
+        },
+        {
+          "name": "Book Appointment Payment Callback",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/appointment/book-appointment/payment/callback?paymentID={{bkashPaymentId}}&status=success",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "appointment",
+                "book-appointment",
+                "payment",
+                "callback"
+              ],
+              "query": [
+                {
+                  "key": "paymentID",
+                  "value": "{{bkashPaymentId}}"
+                },
+                {
+                  "key": "status",
+                  "value": "success"
+                }
+              ]
+            },
+            "description": "Expected: **200**. No auth — this is the URL bKash itself redirects the patient's browser to after checkout, so the only realistic way to hit it is to finish a payment from **Book Appointment** / **Pay Appointment**.\n\nQuery params:\n- `paymentID` — the bKash payment id. The value in `Payment.bkashPaymentId` comes back in the `create` response's `gatewayResponse` (or from the bKash redirect URL itself); set the `{{bkashPaymentId}}` collection variable to it.\n- `status` — `success` / `failure` / `cancel`\n\nOn `success` the server executes the bKash payment and then, in one transaction: sets the appointment to `CONFIRMED`, assigns `serialNumber` (taken slots + 1) and `joiningTime` (`schedule.startDateTime` + `(serialNumber - 1) * 20` minutes), decrements `schedule.availableSlots`, marks the payment `PAID` with `bkashTrxId` / `paidAt` / `gatewayResponse`, generates a PDF invoice (`appointment.recordUrl`) and emails it to the patient.\n\nMissing `paymentID` or `status` → 400. The other statuses short-circuit without executing the payment."
+          },
+          "response": []
+        },
+        {
+          "name": "Update Appointment Status",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"status\": \"ONGOING\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/appointment/update-status/{{appointmentId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "appointment",
+                "update-status",
+                "{{appointmentId}}"
+              ]
+            },
+            "description": "Expected: **200** with the updated appointment. DOCTOR only, on their own appointment (the lookup filters on the caller's `doctorId`).\n\nBody: `status`, either `\"ONGOING\"` or `\"COMPLETED\"` — Zod rejects anything else with 400.\n\nThe transition is strictly ordered, so run this request **twice** with the demo value swapped to `\"COMPLETED\"`:\n1. `CONFIRMED` + `\"ONGOING\"` → `ONGOING`\n2. `ONGOING` + `\"COMPLETED\"` → `COMPLETED`\n\nSkipping a step is refused: from `CONFIRMED` a status of `\"COMPLETED\"` returns 400 \"Confirmed Appointment Must Be Ongoing At First\", and from `ONGOING` anything but `\"COMPLETED\"` returns 400.\n\nFailure cases: already `COMPLETED` or `CANCELLED` → 403, still `PENDING` (bKash checkout not finished) → 403, not found / not yours → 404.\n\nReaching `COMPLETED` is what unlocks **Create Prescription**."
+          },
+          "response": []
+        },
+        {
+          "name": "Get My Appointments",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {},
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "if (res && Array.isArray(res.data) && res.data.length) {",
+                  "    if (!pm.collectionVariables.get(\"appointmentId\")) {",
+                  "        pm.collectionVariables.set(\"appointmentId\", res.data[0].id);",
+                  "    }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/appointment/my-appointments?page=1&limit=10&sortBy=createdAt&sortOrder=desc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "appointment",
+                "my-appointments"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "sortBy",
+                  "value": "createdAt"
+                },
+                {
+                  "key": "sortOrder",
+                  "value": "desc"
+                },
+                {
+                  "key": "status",
+                  "value": "CONFIRMED",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Expected: **200**, paginated. PATIENT only — the caller's own appointments, with the related `doctor`, `schedule` and `payment` included, so the status of the bKash payment is visible next to the appointment status.\n\nQuery params: `page`, `limit`, `sortBy`, `sortOrder` (defaults `page=1`, `limit=10`, `sortBy=createdAt`, `sortOrder=desc`) and `status` — `PENDING` / `CONFIRMED` / `CANCELLED` / `ONGOING` / `COMPLETED`.\n\nNo patient profile for the token → 404.\n\nThe test script stores the first row's id as `{{appointmentId}}`, which **Pay Appointment**, **Cancel Appointment**, **Update Appointment Status**, **Get Single Appointment** and the whole **Prescription** folder depend on. With `sortOrder=desc` that is the most recently created appointment, i.e. the one just booked."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Doctor Appointments",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {},
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "if (res && Array.isArray(res.data) && res.data.length) {",
+                  "    if (!pm.collectionVariables.get(\"appointmentId\")) {",
+                  "        pm.collectionVariables.set(\"appointmentId\", res.data[0].id);",
+                  "    }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/appointment/doctor-appointments?page=1&limit=10&sortBy=createdAt&sortOrder=desc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "appointment",
+                "doctor-appointments"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "sortBy",
+                  "value": "createdAt"
+                },
+                {
+                  "key": "sortOrder",
+                  "value": "desc"
+                },
+                {
+                  "key": "status",
+                  "value": "CONFIRMED",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Expected: **200**, paginated. DOCTOR only — the caller's own appointments, with the related `patient`, `schedule` and `payment` included. This is the doctor's day list: filter `status=CONFIRMED` to get today's roster, then feed each id into **Update Appointment Status**.\n\nQuery params: `page`, `limit`, `sortBy`, `sortOrder` (defaults `page=1`, `limit=10`, `sortBy=createdAt`, `sortOrder=desc`) and `status` — `PENDING` / `CONFIRMED` / `CANCELLED` / `ONGOING` / `COMPLETED`.\n\nNo doctor profile for the token → 404. The test script backfills `{{appointmentId}}` from the first row when it is still empty — run it with the doctor account logged in, straight after the patient books."
+          },
+          "response": []
+        },
+        {
+          "name": "Get All Appointments (Admin)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/appointment/all-appointments?page=1&limit=10&sortBy=createdAt&sortOrder=desc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "appointment",
+                "all-appointments"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "sortBy",
+                  "value": "createdAt"
+                },
+                {
+                  "key": "sortOrder",
+                  "value": "desc"
+                },
+                {
+                  "key": "status",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "doctorId",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "patientId",
+                  "value": "{{patientId}}",
+                  "disabled": true
+                },
+                {
+                  "key": "doctorEmail",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "patientEmail",
+                  "value": "",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Expected: **200**, paginated. ADMIN / SUPER_ADMIN only — every appointment across all patients and doctors, each with `patient`, `doctor`, `schedule` and `payment`.\n\nQuery params: `page`, `limit`, `sortBy`, `sortOrder` (defaults `page=1`, `limit=10`, `sortBy=createdAt`, `sortOrder=desc`), plus optional\n- `status` — `PENDING` / `CONFIRMED` / `CANCELLED` / `ONGOING` / `COMPLETED`\n- `doctorId`, `patientId` — exact ids\n- `doctorEmail`, `patientEmail` — exact emails\n\nHandy for support queries, e.g. `?status=CANCELLED&patientEmail=mentor.saminravi@gmail.com`. An admin is also allowed to cancel any appointment through **Cancel Appointment**."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Single Appointment",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/appointment/{{appointmentId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "appointment",
+                "{{appointmentId}}"
+              ]
+            },
+            "description": "Expected: **200**, **404** if the id is unknown, **403** if you are not allowed to see it. PATIENT / DOCTOR / ADMIN / SUPER_ADMIN.\n\n`{{appointmentId}}` is captured by **Get My Appointments** or **Get Doctor Appointments**.\n\nOwnership rules: a PATIENT may only read their own appointment and a DOCTOR only their own; ADMIN and SUPER_ADMIN may read any. Each access returns the appointment with a slim `patient` (`id`, `name`, `email`, `userId`), a slim `doctor` (`id`, `name`, `specialization`, `userId`), the full `schedule` and the `payment`.\n\nCompare the `userId` in those sub-objects with the token's own user to see why a 403 was returned."
+          },
+          "response": []
+        }
+      ],
+      "description": "All nine `/api/v1/appointment` endpoints: booking (which kicks off a bKash payment), the bKash redirect callback, doctor-side status progression, cancellation with automatic refund, and the role-scoped list/detail views."
+    },
+    {
+      "name": "Payment",
+      "item": [
+        {
+          "name": "Get My Payments",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {},
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "if (res && Array.isArray(res.data) && res.data.length) {",
+                  "    if (!pm.collectionVariables.get(\"paymentId\")) {",
+                  "        pm.collectionVariables.set(\"paymentId\", res.data[0].id);",
+                  "    }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/payment/my-payments?page=1&limit=10&sortBy=createdAt&sortOrder=desc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "payment",
+                "my-payments"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "sortBy",
+                  "value": "createdAt"
+                },
+                {
+                  "key": "sortOrder",
+                  "value": "desc"
+                }
+              ]
+            },
+            "description": "Expected: **200**, paginated. PATIENT only — the payments belonging to the caller's own appointments, resolved through the `Patient` profile in the token (no patient profile → 404).\n\nQuery params: `page`, `limit`, `sortBy`, `sortOrder` (defaults `page=1`, `limit=10`, `sortBy=createdAt`, `sortOrder=desc`). There is no `status` filter on this endpoint.\n\nEach row carries the money trail: `amount` / `currency` (`BDT`), `status` (`UNPAID` / `PAID` / `FAILED` / `CANCELLED` / `REFUNDED`), `merchantInvoiceNumber` (which is the **appointment id**), `bkashPaymentId`, `bkashTrxId`, `paidAt`, the raw `gatewayResponse`, and on a refund `refundTrxId` / `refundAmount` / `refundReason` / `refundedAt`.\n\nThe test script stores the first row's id as `{{paymentId}}` for **Get Single Payment**."
+          },
+          "response": []
+        },
+        {
+          "name": "Get All Payments (Admin)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/payment/all-payments?page=1&limit=10&sortBy=createdAt&sortOrder=desc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "payment",
+                "all-payments"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "sortBy",
+                  "value": "createdAt"
+                },
+                {
+                  "key": "sortOrder",
+                  "value": "desc"
+                },
+                {
+                  "key": "patientEmail",
+                  "value": "",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Expected: **200**, paginated. ADMIN / SUPER_ADMIN only — every payment record in the system.\n\nQuery params: `page`, `limit`, `sortBy`, `sortOrder` (defaults `page=1`, `limit=10`, `sortBy=createdAt`, `sortOrder=desc`) plus optional `patientEmail` (partial match, case-insensitive) to trace one patient's spend.\n\nThis is the endpoint behind reconciliation: `amount` vs `refundAmount` per row, and `status` telling you whether bKash actually captured the money (`PAID`) or the appointment died before checkout (`FAILED` / `CANCELLED`)."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Single Payment",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/payment/{{paymentId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "payment",
+                "{{paymentId}}"
+              ]
+            },
+            "description": "Expected: **200** with one payment, **404** if the id is unknown, **403** if you are not allowed to see it. PATIENT (own payments only) / ADMIN / SUPER_ADMIN. A DOCTOR is not accepted here — 403 from the role gate.\n\n`{{paymentId}}` is captured by **Get My Payments**.\n\nThe lookup resolves the `Patient` from the token, so a patient who passes another patient's `paymentId` gets 403 while an admin gets the full record. The payload includes `appointmentId`, the bKash ids, the raw `gatewayResponse` and the refund fields when applicable."
+          },
+          "response": []
+        }
+      ],
+      "description": "All three `/api/v1/payment` endpoints — read-only views over the `Payment` records that the bKash flow in Appointment creates and mutates. No write endpoints here."
+    },
+    {
+      "name": "Prescription",
+      "item": [
+        {
+          "name": "Create Prescription",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {},
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "if (res && res.data && res.data.appointmentId) {",
+                  "    pm.collectionVariables.set(\"appointmentId\", res.data.appointmentId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"appointmentId\": \"{{appointmentId}}\",\n    \"findings\": \"Mild seasonal allergic rhinitis, no signs of infection.\",\n    \"medicines\": [\n        {\n            \"name\": \"Cetirizine 10mg\",\n            \"dosage\": \"1 tablet\",\n            \"duration\": \"7 days\",\n            \"instructions\": \"Take once daily at night\"\n        },\n        {\n            \"name\": \"Saline Nasal Spray\",\n            \"dosage\": \"2 sprays per nostril\",\n            \"duration\": \"10 days\",\n            \"instructions\": \"Use twice daily\"\n        }\n    ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/prescription/create-prescription",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "prescription",
+                "create-prescription"
+              ]
+            },
+            "description": "Expected: **201** with the created prescription. DOCTOR only, and only for an appointment they own that is already `COMPLETED` — so the chain is **Book Appointment** → bKash checkout → **Update Appointment Status** twice.\n\nBody (Zod):\n- `appointmentId` — required, min 1 char; prefilled from `{{appointmentId}}`\n- `findings` — required, trimmed, min 5 characters\n- `medicines` — required array, **at least one** entry; per medicine `name`, `dosage`, `duration` are required and `instructions` is optional\n\nSide effects: stores the prescription against the appointment, generates a PDF (saved on the appointment as `prescriptionUrl` / `prescriptionPublicId`) and emails it to the patient.\n\nFailure cases: no doctor profile → 404, appointment not found / not yours → 404, appointment still `PENDING`/`CONFIRMED`/`ONGOING` → 400, already prescribed → 409, validation error → 400 with the first Zod issue message."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Single Prescription",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/prescription/{{appointmentId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "prescription",
+                "{{appointmentId}}"
+              ]
+            },
+            "description": "Expected: **200** with the prescription, **404** when the appointment has no prescription yet. PATIENT / DOCTOR / ADMIN / SUPER_ADMIN.\n\nNote the path parameter is `{{appointmentId}}`, **not** a prescription id — the prescription is looked up by the appointment it belongs to. `{{appointmentId}}` is captured by **Get My Appointments** / **Get Doctor Appointments**, so run this before **Create Prescription** to watch the 404 → 200 transition.\n\nOwnership rules: a PATIENT may only read a prescription for their own appointment and a DOCTOR only for their own, otherwise 403; ADMIN and SUPER_ADMIN may read any."
+          },
+          "response": []
+        }
+      ],
+      "description": "Both `/api/v1/prescription` endpoints. A prescription is written by the doctor only after the appointment is `COMPLETED` — see Appointment → **Update Appointment Status**."
+    },
+    {
+      "name": "Analytics",
+      "item": [
+        {
+          "name": "Get Patient Analytics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/analytics/patient-analytics",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "analytics",
+                "patient-analytics"
+              ]
+            },
+            "description": "Expected: **200** with a JSON object (no `meta`, no pagination). PATIENT only — 403 for any other role, 401 with no token.\n\nAggregates the caller's own history:\n- appointment counts: `totalAppointments`, `upcomingAppointments`, `completedAppointments`, `cancelledAppointments`\n- money: `totalSpent` (sum of `PAID` payments) and `totalRefunded`\n\nUnpaginated and no query params. The `upcoming` figure only counts appointments that are not yet finished, so a freshly registered patient returns all zeros."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Doctor Analytics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/analytics/doctor-analytics",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "analytics",
+                "doctor-analytics"
+              ]
+            },
+            "description": "Expected: **200** with a JSON object. DOCTOR only — 403 for any other role.\n\nAverages out over the caller's own data:\n- schedules: `totalSchedules`, `publishedSchedules`\n- appointments grouped by status: `totalAppointments`, `confirmedAppointments`, `ongoingAppointments`, `completedAppointments`, `cancelledAppointments`, `pendingAppointments`\n- money: `totalEarnings` (sum of `PAID` payments) and `totalRefunded`\n\nNo query params and no pagination."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Admin Analytics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/analytics/admin-analytics",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "analytics",
+                "admin-analytics"
+              ]
+            },
+            "description": "Expected: **200** with a JSON object. ADMIN / SUPER_ADMIN only — 403 for patient and doctor roles.\n\nPlatform-wide rollup:\n- `totalDoctors` / `totalPatients` / `totalAppointments`\n- `pendingDoctors` / `approvedDoctors` / `rejectedDoctors` (verification-status breakdown)\n- `totalRevenue` and `totalRefunded`\n\nNo query params and no pagination. Run it with **Login As Admin (Seeded)**; the collection's `{{accessToken}}` is shared, so re-login before switching to another role."
+          },
+          "response": []
+        }
+      ],
+      "description": "All three `/api/v1/analytics` endpoints — read-only aggregate dashboards, one per role. Each is gated to exactly one role, so log in with the matching account before calling it."
+    },
+    {
+      "name": "Misc",
+      "item": [
+        {
+          "name": "Root Health Check",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{host}}/",
+              "host": [
+                "{{host}}"
+              ],
+              "path": [
+                ""
+              ]
+            },
+            "description": "Expected: **200** with `{ success: true, message: \"Welcome to PH Healthcare System Backend\" }`. No auth. Defined directly in `app.ts`, so it sits at the server root rather than under `/api/v1` — hence `{{host}}` and not `{{baseUrl}}`."
+          },
+          "response": []
+        },
+        {
+          "name": "bKash Token Test",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{host}}/test",
+              "host": [
+                "{{host}}"
+              ],
+              "path": [
+                "test"
+              ]
+            },
+            "description": "Expected: **200** with the same welcome payload. No auth. Also defined directly in `app.ts`, hence `{{host}}`.\n\nBefore responding it requests a fresh bKash `grant_token` server-side and logs it to the console, so this doubles as a credentials check for the sandbox: a 500 here almost always means the `BKASH_*` env values (app key/secret, username, password, base url) are wrong, and **Book Appointment** will fail the same way."
+          },
+          "response": []
+        }
+      ],
+      "description": "The two endpoints defined directly in `app.ts` outside the `/api/v1` router group, so they use `{{host}}` (server root) rather than `{{baseUrl}}`."
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:5000/api/v1",
+      "type": "string"
+    },
+    {
+      "key": "host",
+      "value": "http://localhost:5000",
+      "type": "string"
+    },
+    {
+      "key": "accessToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "refreshToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "userId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "patientId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "doctorId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "doctorEmail",
+      "value": "dr.sarah.jenkins@example.com",
+      "type": "string"
+    },
+    {
+      "key": "scheduleId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "appointmentId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "paymentId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "bkashPaymentId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "otp",
+      "value": "123456",
+      "type": "string"
+    },
+    {
+      "key": "doctorOtp",
+      "value": "123456",
+      "type": "string"
+    },
+    {
+      "key": "testerAdminEmail",
+      "value": "testeradmin@gmail.com",
+      "type": "string"
+    },
+    {
+      "key": "testerAdminPassword",
+      "value": "Tester@admin12345",
+      "type": "string"
+    },
+    {
+      "key": "testerDoctorEmail",
+      "value": "testerdoctor@gmail.com",
+      "type": "string"
+    },
+    {
+      "key": "testerDoctorPassword",
+      "value": "Tester@admin12345",
+      "type": "string"
+    },
+    {
+      "key": "todayStart",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "todayEnd",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "updatedStart",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "updatedEnd",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "todayDate",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}

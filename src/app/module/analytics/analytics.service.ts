@@ -71,8 +71,6 @@ const getAdminAnalytics = async () => {
 
     const totalRevenue = (totalRevenueResult._sum.amount?.toNumber() || 0) - totalRefunded 
 
-    
-
     return {
         totalDoctors,
         totalPendingDoctorApplications,
